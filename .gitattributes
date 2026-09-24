@@ -1,0 +1,5 @@
+# Keep script and docs line endings consistent (LF) across platforms
+*.lua text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
