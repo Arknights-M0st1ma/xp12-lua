@@ -7,6 +7,7 @@ Practical X-Plane 12 Lua scripts (FlyWithLua). 收集我自己在飞的、日常
 | 脚本 | 作用 | 依赖 |
 |---|---|---|
 | [Instant Quick-Looks](./XP_Instant_Quicklook/) | 把「跳转到已保存的 3D 座舱视角」从约 0.5 秒的缓动变成**瞬时**切换 | X-Plane 12 + FlyWithLua |
+| [Smart Headphone](./XP_Smart_Headphone/) | 模拟**主动降噪耳机**：把座舱里的发动机低频轰鸣降下去，无线电、语音与告警保持清晰，用一个自定义快捷键开关 | X-Plane 12 + FlyWithLua |
 
 每个脚本都有自己的文件夹，里面包含脚本本体、说明文档（英文原版 + 中文版）。
 
@@ -32,6 +33,10 @@ XP12Lua/
     instant_quicklook.lua
     instant_quicklook.README.md          英文说明
     instant_quicklook.README.zh-CN.md    中文说明
+  XP_Smart_Headphone/
+    smart_headphone.lua
+    smart_headphone.README.md            英文说明
+    smart_headphone.README.zh-CN.md      中文说明
 ```
 
 ## 许可
@@ -47,6 +52,7 @@ A small collection of practical X-Plane 12 Lua scripts for FlyWithLua.
 | Script | What it does |
 |---|---|
 | [Instant Quick-Looks](./XP_Instant_Quicklook/) | Makes X-Plane's "go to saved 3-D cockpit location" snap **instantly** instead of gliding over ~0.5 s |
+| [Smart Headphone](./XP_Smart_Headphone/) | Simulates active noise cancelling headphones: fades the engine drone, keeps radio, voices and warnings clear, toggled by one key you bind |
 
 **Install:** copy the `.lua` files into `<X-Plane 12>/Resources/plugins/FlyWithLua/Scripts/`, then
 Plugins → FlyWithLua → *Reload all Lua scripts*. See each script's own README for usage.
