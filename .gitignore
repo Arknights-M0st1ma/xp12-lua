@@ -1,0 +1,13 @@
+# FlyWithLua runtime output
+*.log
+FlyWithLua_debug.txt
+
+# Editors / OS
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+*.bak
+*.orig
+*.rej
