@@ -3,11 +3,16 @@
     --------------------------------------------------
     Bind a key to "FlyWithLua/nearby_weather/toggle" (X-Plane: Settings ->
     Keyboard -> search for "nearby weather") and press it to pop up a compact
-    panel in the top left corner:
+    panel in the top left corner of the screen:
 
       * the METAR report of the three nearest usable airports, taken from
         X-Plane's own weather system,
       * the time zone at the aircraft's position, plus Zulu (GMT) and local time.
+
+    The panel is a real X-Plane floating window with the simulator's own window
+    frame: drag it by its title bar, resize it by its edges, close it with the
+    cross - or just press your key again.  Its contents are drawn with ImGui,
+    which is what makes the text scale with your display.
 
     Heliports, seaplane bases, private/backcountry strips and airports whose
     longest paved runway is shorter than MIN_PAVED_RUNWAY_FT are filtered out.
@@ -33,15 +38,17 @@
 -- ===========================================================================
 
 local CFG = {
-    -- Panel ---------------------------------------------------------------
-    panel_width     = 560,     -- pixels
-    margin_x        = 28,      -- distance of the panel from the left border
-    margin_y        = 28,      -- distance of the panel from the top border
-    start_visible   = false,   -- false: hidden until you press the key
-
-    -- Text: "proportional" (X-Plane's own UI font, small and crisp) or
-    --       "helvetica18" (built-in bitmap font, handy on 4K displays)
-    font            = "proportional",
+    -- The window ----------------------------------------------------------
+    -- It is a real X-Plane floating window: X-Plane draws its frame and title
+    -- bar, you drag it with the mouse and resize it by its edges.
+    window_width   = 600,     -- logical size; multiplied by text_scale below
+    window_height  = 340,
+    margin_left    = 30,      -- where it appears: from the left screen edge
+    margin_top     = 30,      -- ... and from the top edge of the screen
+    text_scale     = 0,       -- 0 = automatic (bigger on big displays),
+                              -- or a fixed number such as 1.4 / 1.8 / 2.4
+    start_visible  = false,   -- false: hidden until you press your key
+    resizable      = true,    -- let the window be resized by its edges
 
     -- Airports ------------------------------------------------------------
     airport_count        = 3,     -- how many airports to list
@@ -66,51 +73,30 @@ local CFG = {
 local APT_DAT = "Resources/default scenery/default apt dat/Earth nav data/apt.dat"
 
 -- ===========================================================================
---  2. Colours - X-Plane 12 style: dark translucent panel, light text
+--  2. Colours - dark panel, light text, X-Plane 12 style
 -- ===========================================================================
+
+-- ImGui wants packed 0xAABBGGRR colours (the order of its own IM_COL32 macro),
+-- so build them from ordinary R, G, B, A bytes.
+local function rgb(r, g, b, a)
+    return (a or 255) * 0x1000000 + b * 0x10000 + g * 0x100 + r
+end
 
 local COL = {
-    panel      = { 0.051, 0.059, 0.071, 0.82 },
-    border     = { 1.000, 1.000, 1.000, 0.14 },
-    hairline   = { 1.000, 1.000, 1.000, 0.09 },
-    accent     = { 0.380, 0.690, 0.960, 1.00 },
-    text       = { 0.925, 0.941, 0.957, 1.00 },
-    dim        = { 0.627, 0.667, 0.706, 1.00 },
-    faint      = { 0.451, 0.486, 0.529, 1.00 },
-    vfr        = { 0.239, 0.804, 0.376, 1.00 },
-    mvfr       = { 0.259, 0.612, 0.949, 1.00 },
-    ifr        = { 0.949, 0.318, 0.278, 1.00 },
-    lifr       = { 0.788, 0.361, 0.855, 1.00 },
+    panel      = rgb(13, 15, 18, 238),      -- window background
+    border     = rgb(255, 255, 255, 36),    -- window border
+    accent     = rgb(97, 176, 245),         -- the title
+    text       = rgb(236, 240, 244),
+    dim        = rgb(160, 170, 180),
+    faint      = rgb(115, 124, 135),
+    vfr        = rgb(61, 205, 96),
+    mvfr       = rgb(66, 156, 242),
+    ifr        = rgb(242, 81, 71),
+    lifr       = rgb(201, 92, 218),
 }
 
 -- ===========================================================================
---  3. Text output (font abstraction)
--- ===========================================================================
-
-local FONTS = {
-    proportional = {
-        line  = 15,   -- distance between two text rows
-        glyph = 11,   -- rough glyph height, used to centre the text in a row
-        width = function(s) return measure_string(s) end,
-        draw  = function(x, y, s, c)
-            draw_string(x, y, s, c[1], c[2], c[3])
-        end,
-    },
-    helvetica18 = {
-        line  = 21,
-        glyph = 18,
-        width = function(s) return measure_string(s, "Helvetica_18") end,
-        draw  = function(x, y, s, c)
-            glColor4f(c[1], c[2], c[3], 1.0)
-            draw_string_Helvetica_18(x, y, s)
-        end,
-    },
-}
-
-local FONT = FONTS[CFG.font] or FONTS.proportional
-
--- ===========================================================================
---  4. Small helpers
+--  3. Small helpers
 -- ===========================================================================
 
 local function trim(s)
@@ -158,11 +144,13 @@ if not math.atan2 then
     math.atan2 = function(y, x) return math.atan(y, x) end
 end
 
+-- Wrap a string into lines that fit into max_w pixels.  Only call this while
+-- the ImGui panel is being built: CalcTextSize() then knows the font scale.
 local function wrap_text(text, max_w)
     local lines, cur = {}, ""
     for word in tostring(text):gmatch("%S+") do
         local candidate = (cur == "") and word or (cur .. " " .. word)
-        if cur ~= "" and FONT.width(candidate) > max_w then
+        if cur ~= "" and imgui.CalcTextSize(candidate) > max_w then
             lines[#lines + 1] = cur
             cur = word
         else
@@ -175,7 +163,7 @@ local function wrap_text(text, max_w)
 end
 
 -- ===========================================================================
---  5. apt.dat - X-Plane's airport database
+--  4. apt.dat - X-Plane's airport database
 -- ===========================================================================
 
 -- Surface codes: 1/2 are the classic asphalt/concrete codes, 20-38 and 50-57
@@ -340,7 +328,7 @@ local function scan_coroutine(path)
 end
 
 -- ===========================================================================
---  6. METAR from X-Plane itself (XPLMGetMETARForAirport through LuaJIT FFI)
+--  5. METAR from X-Plane itself (XPLMGetMETARForAirport through LuaJIT FFI)
 -- ===========================================================================
 
 local XPLM_CDEF = [[
@@ -403,7 +391,7 @@ local function init_metar_source()
 end
 
 -- ===========================================================================
---  7. METAR decoding (flight category + observation age)
+--  6. METAR decoding (flight category + observation age)
 -- ===========================================================================
 
 local BAD_CEILING_FT = 99999
@@ -507,7 +495,7 @@ local function observation_age_min(parsed)
 end
 
 -- ===========================================================================
---  8. Coarse time zone labels (always validated against the simulator's own
+--  7. Coarse time zone labels (always validated against the simulator's own
 --     UTC offset, so the label can never contradict the clocks shown)
 -- ===========================================================================
 
@@ -560,7 +548,7 @@ local function zone_label(lat, lon, offset_hours)
 end
 
 -- ===========================================================================
---  9. State
+--  8. State
 -- ===========================================================================
 
 dataref("xpnw_zulu_sec",  "sim/time/zulu_time_sec",  "readonly")
@@ -590,6 +578,14 @@ local S = {
     fetch_ok    = 0,
     status      = "starting up",
     force_update = false,
+    -- the panel window (reused when FlyWithLua re-runs this script)
+    wnd         = xpnw_wnd,
+    wnd_failed  = false,
+    scale       = nil,
+    pos_x       = nil,
+    pos_y       = nil,
+    window_w    = 0,
+    window_h    = 0,
 }
 
 local metar_fetch, metar_error = init_metar_source()
@@ -599,7 +595,7 @@ if metar_error then
 end
 
 -- ===========================================================================
--- 10. Background scan of apt.dat
+--  9. Background scan of apt.dat
 -- ===========================================================================
 
 local function apt_dat_path()
@@ -676,7 +672,7 @@ function nwp_step()
 end
 
 -- ===========================================================================
--- 11. Choosing the nearest airports and reading their METARs
+-- 10. Choosing the nearest airports and reading their METARs
 -- ===========================================================================
 
 local function pick_candidates()
@@ -801,36 +797,8 @@ function nwp_update()
 end
 
 -- ===========================================================================
--- 12. Drawing
+-- 11. The panel: a real X-Plane floating window, drawn with ImGui
 -- ===========================================================================
-
-local PAD      = 16   -- inner padding of the panel
-local HAIR_PAD = 8    -- space above and below a separator line
-
-local function quad(x1, y1, x2, y2, colour)
-    glColor4f(colour[1], colour[2], colour[3], colour[4] or 1.0)
-    glBegin_QUADS()
-    glVertex2f(x1, y1)
-    glVertex2f(x2, y1)
-    glVertex2f(x2, y2)
-    glVertex2f(x1, y2)
-    glEnd()
-end
-
-local function rounded_panel(x1, y1, x2, y2, radius, mode)
-    local function corner(cx, cy, from)
-        for i = 0, 3 do
-            local a = math.rad(from + 90 * i / 3)
-            glVertex2f(cx + radius * math.cos(a), cy + radius * math.sin(a))
-        end
-    end
-    if mode == "line" then glBegin_LINE_LOOP() else glBegin_POLYGON() end
-    corner(x1 + radius, y1 + radius, 180)
-    corner(x2 - radius, y1 + radius, 270)
-    corner(x2 - radius, y2 - radius,   0)
-    corner(x1 + radius, y2 - radius,  90)
-    glEnd()
-end
 
 local function seconds_to_clock(seconds)
     if not seconds then return "--:--:--" end
@@ -849,113 +817,210 @@ local function offset_label(offset_hours)
     return string.format("UTC%s%02d:%02d", sign, hours, minutes)
 end
 
-function nwp_draw()
-    if not xpnw_visible then return end
+-- X-Plane measures floating windows in "boxels" (device independent pixels),
+-- so the same font size looks half as big on a 4K display as on a 1080p one.
+-- Scale the whole panel - window size, text and padding - with the screen
+-- height, unless a fixed factor was set in the settings above.
+local function ui_scale()
+    if CFG.text_scale and CFG.text_scale > 0 then return CFG.text_scale end
+    local _, height = XPLMGetScreenSize()
+    return clamp((height or SCREEN_HIGHT or 1080) / 1000, 1.25, 2.6)
+end
 
-    local screen_h = SCREEN_HIGHT or 1080
-    local x        = CFG.margin_x
-    local top      = screen_h - CFG.margin_y
-    local left     = x + PAD
-    local right    = x + CFG.panel_width - PAD
-    local usable   = right - left
-    local lh       = FONT.line
-    local base     = math.floor((lh - FONT.glyph) / 2)
+-- Window positions are offsets from the lower left corner of the desktop.
+local function desktop_bounds()
+    if type(XPLMGetScreenBoundsGlobal) == "function" then
+        local left, top, right, bottom = XPLMGetScreenBoundsGlobal()
+        if left and bottom then return left, top, right, bottom end
+    end
+    return 0, SCREEN_HIGHT or 1080, SCREEN_WIDTH or 1920, 0
+end
 
-    -- ---- clocks ----------------------------------------------------------
-    local zulu  = seconds_to_clock(xpnw_zulu_sec)
-    local local_clock = seconds_to_clock(xpnw_local_sec)
-    local offset_hours
-    if xpnw_zulu_sec and xpnw_local_sec then
-        local delta = (xpnw_local_sec - xpnw_zulu_sec) % 86400
-        if delta > 50400 then delta = delta - 86400 end   -- keep it in -12h..+14h
-        offset_hours = delta / 3600
-    end
-    local offset_text = offset_label(offset_hours)
+local function default_position(width, height)
+    local _, top, _, bottom = desktop_bounds()
+    return CFG.margin_left, (top - bottom) - CFG.margin_top - height
+end
 
-    -- ---- rows ------------------------------------------------------------
-    local rows = {}
-    local function text_row(segs, height)
-        rows[#rows + 1] = { h = height or lh, segs = segs }
-    end
-    local function hair_row()
-        rows[#rows + 1] = { hair = true, h = 1, before = HAIR_PAD, after = HAIR_PAD }
-    end
-    local function gap_row(height)
-        rows[#rows + 1] = { h = height }
-    end
-    local function seg(text, colour, align, offset)
-        local s = { text = text, colour = colour, align = align, offset = offset or 0 }
-        if align == "right" then s.width = FONT.width(text) end
-        return s
+-- ---- ImGui helpers --------------------------------------------------------
+
+local PAD_X, PAD_Y = 16, 12        -- logical padding inside the window
+
+-- Coloured text.  TextUnformatted() is used on purpose: Text() and
+-- TextColored() are printf style, and a '%' in a METAR remark would be read as
+-- a format specifier.
+local function panel_text(text, colour)
+    imgui.PushStyleColor(imgui.constant.Col.Text, colour)
+    imgui.TextUnformatted(text)
+    imgui.PopStyleColor()
+end
+
+local function panel_same_line(x)
+    imgui.SameLine(x, 0)              -- 0: do not add the style item spacing
+end
+
+local function age_text(parsed)
+    local age = observation_age_min(parsed)
+    if not age then return nil end
+    if age < -1 then return "ahead of clock" end   -- sim clock moved into the past
+    if age > 720 then return "stale" end
+    if age < 90 then return string.format("%d min ago", math.floor(age + 0.5)) end
+    return string.format("%.1f h ago", age / 60)
+end
+
+-- ---- the window itself ----------------------------------------------------
+
+local function create_window()
+    if S.wnd_failed then return nil end
+    if SUPPORTS_FLOATING_WINDOWS == nil or type(imgui) ~= "table"
+        or type(float_wnd_create) ~= "function"
+        or type(float_wnd_set_imgui_builder) ~= "function" then
+        S.wnd_failed = true
+        logMsg("nearby_weather: this FlyWithLua build has no ImGui floating windows - " ..
+               "the panel needs FlyWithLua NG+ 2.8.x for X-Plane 12")
+        return nil
     end
 
-    -- header
-    text_row({
-        seg("NEARBY METAR & TIME", COL.accent),
-        seg(S.status or "", COL.faint, "right"),
-    })
-    hair_row()
+    local scale  = ui_scale()
+    local width  = math.floor(CFG.window_width * scale)
+    local height = math.floor(CFG.window_height * scale)
+    local created, wnd = pcall(float_wnd_create, width, height, 1, true)
+    if not created or wnd == nil then
+        S.wnd_failed = true
+        logMsg("nearby_weather: could not create the panel window: " .. tostring(wnd))
+        return nil
+    end
 
-    -- one block per airport
+    S.wnd, S.scale, S.window_w, S.window_h = wnd, scale, width, height
+    xpnw_wnd = wnd
+
+    pcall(float_wnd_set_title, wnd, "Nearby METAR & Time")
+    pcall(float_wnd_set_imgui_builder, wnd, "nwp_build")
+    pcall(float_wnd_set_onclose, wnd, "nwp_onclose")
+    if CFG.resizable ~= false and type(float_wnd_set_resizing_limits) == "function" then
+        pcall(float_wnd_set_resizing_limits, wnd,
+              math.floor(width * 0.6), math.floor(height * 0.5),
+              SCREEN_WIDTH or 1920, SCREEN_HIGHT or 1080)
+    end
+    local pos_x, pos_y = S.pos_x, S.pos_y
+    if not pos_x then pos_x, pos_y = default_position(width, height) end
+    pcall(float_wnd_set_position, wnd, pos_x, pos_y)
+
+    logMsg(string.format("nearby_weather: panel window %dx%d boxels, text scale %.2f",
+                         width, height, scale))
+    return wnd
+end
+
+function nwp_show()
+    local adopted = S.wnd ~= nil
+    local wnd = S.wnd or create_window()
+    if not wnd then return end
+    if adopted then
+        -- The window survived a reload of this script, so point it at the
+        -- callbacks of the current run of the script.
+        pcall(float_wnd_set_imgui_builder, wnd, "nwp_build")
+        pcall(float_wnd_set_onclose, wnd, "nwp_onclose")
+    end
+    pcall(float_wnd_set_visible, wnd, 1)
+    if type(float_wnd_bring_to_front) == "function" then
+        pcall(float_wnd_bring_to_front, wnd)
+    end
+    xpnw_visible = true
+    S.force_update = true
+end
+
+function nwp_hide()
+    local wnd = S.wnd
+    S.wnd, xpnw_wnd, xpnw_visible = nil, nil, false
+    if not wnd then return end
+    -- Remember where the window was, so showing it again does not make it jump.
+    local got, left, _, _, bottom = pcall(float_wnd_get_geometry, wnd)
+    if got and left then
+        local desk_left, _, _, desk_bottom = desktop_bounds()
+        S.pos_x, S.pos_y = left - desk_left, bottom - desk_bottom
+    end
+    pcall(float_wnd_destroy, wnd)
+end
+
+-- FlyWithLua calls this when the window is closed (the cross in the title bar).
+-- Drawing and creating windows is not allowed here, so only bookkeeping.
+function nwp_onclose(wnd)
+    S.wnd, xpnw_wnd, xpnw_visible = nil, nil, false
+end
+
+-- ---- the contents ---------------------------------------------------------
+
+function nwp_build(wnd, x, y)
+    local u     = S.scale or ui_scale()
+    local pad_x = PAD_X * u
+    local pad_y = PAD_Y * u
+
+    if type(imgui.SetWindowFontScale) == "function" then
+        imgui.SetWindowFontScale(u)
+    elseif S.scale_missing == nil then
+        S.scale_missing = true
+        logMsg("nearby_weather: imgui.SetWindowFontScale() is missing - the text will be small")
+    end
+
+    -- Paint the panel ourselves: ImGui fills its window background before the
+    -- builder is called, so a colour pushed here would only reach child
+    -- windows.  Drawing into the window's own draw list is the reliable way to
+    -- get an opaque panel with an accent line and a visible border.
+    local win_w, win_h = imgui.GetWindowSize()
+    imgui.DrawList_AddRectFilled(0, 0, win_w, win_h, COL.panel, 0, 0)
+    local accent_h = math.max(2, math.floor(2 * u))
+    imgui.DrawList_AddRectFilled(0, 0, win_w, accent_h, COL.accent, 0, 0)
+    imgui.DrawList_AddRect(0, 0, win_w - 1, win_h - 1, COL.border, 0, 1, 0)
+
+    imgui.PushStyleVar_2(imgui.constant.StyleVar.WindowPadding, pad_x, pad_y)
+    imgui.PushStyleVar_2(imgui.constant.StyleVar.ItemSpacing, 6 * u, 5 * u)
+
+    -- header ---------------------------------------------------------------
+    local row_w = imgui.GetContentRegionAvail()
+    panel_text("NEARBY METAR & TIME", COL.accent)
+    if S.status and S.status ~= "" then
+        panel_same_line(pad_x + row_w - imgui.CalcTextSize(S.status))
+        panel_text(S.status, COL.faint)
+    end
+    imgui.Separator()
+
+    -- one block per airport -------------------------------------------------
     for index, entry in ipairs(S.display) do
         local apt  = entry.apt
         local name = apt.name or ""
         if #name > 34 then name = name:sub(1, 33) .. "..." end
+        local dist = string.format("%.1f NM  %03.0f", entry.dist, entry.brg or 0)
+        row_w = imgui.GetContentRegionAvail()
 
-        text_row({
-            seg(apt.id, COL.text),
-            seg(name, COL.dim, "left", FONT.width(apt.id) + 10),
-            seg(string.format("%.1f NM  %03.0f", entry.dist, entry.brg or 0), COL.dim, "right"),
-        })
+        panel_text(apt.id, COL.text)
+        panel_same_line(pad_x + imgui.CalcTextSize(apt.id) + 8 * u)
+        panel_text(name, COL.dim)
+        panel_same_line(pad_x + row_w - imgui.CalcTextSize(dist))
+        panel_text(dist, COL.dim)
 
+        local detail = string.format("RWY %s ft %s    elev %s ft",
+                                     commas(apt.ft), surface_name(apt.surf), commas(apt.elev))
         if entry.parsed then
-            local parsed = entry.parsed
-            local age = observation_age_min(parsed)
-            local age_text = ""
-            if age then
-                if age < -1 then
-                    -- The report is stamped later than the simulated clock,
-                    -- which happens when the sim time is moved away from the
-                    -- real time while Real Weather is in use.
-                    age_text = "ahead of clock"
-                elseif age > 720 then
-                    age_text = "stale"
-                elseif age < 90 then
-                    age_text = string.format("%d min", math.floor(age + 0.5))
-                else
-                    age_text = string.format("%.1f h", age / 60)
-                end
+            local chip   = entry.parsed.category .. (entry.parsed.speci and " SPECI" or "")
+            local body_x = imgui.CalcTextSize(chip) + 10 * u
+            local body   = wrap_text(entry.parsed.text, row_w - body_x)
+            panel_text(chip, entry.parsed.colour)
+            panel_same_line(pad_x + body_x)
+            panel_text(body[1], COL.text)
+            for i = 2, #body do
+                imgui.Indent(body_x)
+                panel_text(body[i], COL.text)
+                imgui.Unindent(body_x)
             end
-
-            local chip = parsed.category .. (parsed.speci and " SPECI" or "")
-            local chip_w = FONT.width(chip)
-            local body_x = chip_w + 10
-            local body = wrap_text(parsed.text, usable - body_x - FONT.width(age_text) - 8)
-
-            for i, line in ipairs(body) do
-                local segs = {}
-                if i == 1 then
-                    segs[#segs + 1] = seg(chip, parsed.colour)
-                    if age_text ~= "" then
-                        segs[#segs + 1] = seg(age_text, COL.faint, "right")
-                    end
-                end
-                segs[#segs + 1] = seg(line, COL.text, "left", body_x)
-                text_row(segs)
-            end
+            local age = age_text(entry.parsed)
+            if age then detail = age .. "    " .. detail end
         else
-            text_row({
-                seg("--", COL.faint),
-                seg("no METAR reported by X-Plane for this station", COL.faint, "left", 70),
-            })
+            panel_text("--", COL.faint)
+            panel_same_line(pad_x + 70 * u)
+            panel_text("no METAR reported by X-Plane for this station", COL.faint)
         end
+        panel_text(detail, COL.faint)
 
-        text_row({
-            seg(string.format("RWY %s ft %s    elev %s ft", commas(apt.ft), surface_name(apt.surf), commas(apt.elev)),
-                COL.faint),
-        })
-
-        if index < #S.display then hair_row() end
+        if index < #S.display then imgui.Separator() end
     end
 
     if #S.display == 0 then
@@ -967,79 +1032,54 @@ function nwp_draw()
         else
             message = string.format("no usable airport within %.0f NM", CFG.search_radius_nm)
         end
-        text_row({ seg(message, COL.faint) })
+        panel_text(message, COL.faint)
     elseif #S.display < CFG.airport_count then
-        gap_row(4)
-        text_row({ seg(string.format("no further usable airport within %.0f NM", CFG.search_radius_nm), COL.faint) })
+        panel_text(string.format("no further usable airport within %.0f NM", CFG.search_radius_nm),
+                   COL.faint)
     end
 
-    -- clocks
-    hair_row()
+    -- clocks ---------------------------------------------------------------
+    imgui.Separator()
+    local label_x = 118 * u
+    local function clock_row(label, value)
+        panel_text(label, COL.dim)
+        panel_same_line(pad_x + label_x)
+        panel_text(value, COL.text)
+    end
+
+    local zulu_clock  = seconds_to_clock(xpnw_zulu_sec)
+    local local_clock = seconds_to_clock(xpnw_local_sec)
+    local offset_hours
+    if xpnw_zulu_sec and xpnw_local_sec then
+        local delta = (xpnw_local_sec - xpnw_zulu_sec) % 86400
+        if delta > 50400 then delta = delta - 86400 end   -- keep it in -12h..+14h
+        offset_hours = delta / 3600
+    end
+    local offset_text = offset_label(offset_hours)
     local zone = ""
     if offset_hours and CFG.zone_table then
         local label = zone_label(LATITUDE or 0, LONGITUDE or 0, offset_hours)
         if label then zone = "  " .. label end
     end
-    local half = math.floor(usable * 0.52)
-    text_row({
-        seg("Zulu (UTC)", COL.dim),
-        seg(zulu .. "Z", COL.text, "left", 86),
-        seg("Local", COL.dim, "left", half),
-        seg(local_clock, COL.text, "left", half + 46),
-    })
-    text_row({
-        seg("Zone", COL.dim),
-        seg(offset_text .. zone, COL.text, "left", 86),
-    })
 
-    -- ---- background ------------------------------------------------------
-    local height = PAD
-    for _, row in ipairs(rows) do height = height + (row.before or 0) + row.h + (row.after or 0) end
-    height = height + PAD
-    local bottom = top - height
-    local corner    = 5
+    clock_row("Zulu (UTC)", zulu_clock .. "Z")
+    clock_row("Local", local_clock)
+    clock_row("Zone", offset_text .. zone)
 
-    XPLMSetGraphicsState(0, 0, 0, 1, 1, 0, 0)
-    glColor4f(COL.panel[1], COL.panel[2], COL.panel[3], COL.panel[4])
-    rounded_panel(left - PAD, bottom, right + PAD, top, corner)
-    glColor4f(COL.accent[1], COL.accent[2], COL.accent[3], 0.85)
-    quad(left - PAD + corner, top - 2, right + PAD - corner, top, COL.accent)
-    glColor4f(COL.border[1], COL.border[2], COL.border[3], COL.border[4])
-    rounded_panel(left - PAD, bottom, right + PAD, top, corner, "line")
-
-    -- ---- text ------------------------------------------------------------
-    local y = top - PAD
-    for _, row in ipairs(rows) do
-        y = y - (row.before or 0)
-        if row.hair then
-            quad(left, y - 1, right, y, COL.hairline)
-        else
-            for _, s in ipairs(row.segs or {}) do
-                local sx
-                if s.align == "right" then sx = right - (s.width or 0) - s.offset
-                else sx = left + s.offset end
-                FONT.draw(sx, y - row.h + base, s.text, s.colour)
-            end
-        end
-        y = y - row.h - (row.after or 0)
-    end
+    imgui.PopStyleVar(2)
 end
 
 -- ===========================================================================
--- 13. Key binding and FlyWithLua menu entry
+-- 12. Key binding, FlyWithLua menu entry and callbacks
 -- ===========================================================================
 
 function nwp_toggle()
-    xpnw_visible = not xpnw_visible
-    if xpnw_visible and not S.db and not S.scan and not S.scan_error then
-        start_scan()
-    end
-    S.force_update = xpnw_visible
+    if S.wnd then nwp_hide() else nwp_show() end
 end
 
 create_command(
     "FlyWithLua/nearby_weather/toggle",
-    "Nearby METAR & time: show/hide the panel",
+    "Nearby METAR & time: show/hide the weather panel",
     "nwp_toggle()",
     "", ""
 )
@@ -1048,10 +1088,14 @@ add_macro("Nearby METAR & time: show/hide", "nwp_toggle()")
 
 do_every_frame("nwp_step()")
 do_often("nwp_update()")
-do_every_draw("nwp_draw()")
 
 if CFG.scan_on_load then
     start_scan()
+end
+
+-- The window is gone after a reload, so open it again if it was open before.
+if xpnw_visible then
+    nwp_show()
 end
 
 logMsg("nearby_weather: ready - bind a key to FlyWithLua/nearby_weather/toggle")
